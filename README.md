@@ -22,6 +22,8 @@ polymarket-bot-starter/
 │   ├── recording.py             # Append-only JSONL recordings, three clocks
 │   ├── orderbook.py             # Deterministic replay + quotability rules
 │   ├── replay.py                # Replay CLI
+│   ├── simulator.py             # Queue-conservative fill model + accounting
+│   ├── simulate.py              # Simulator CLI
 │   ├── signal_engine.py         # Signal generation (filled in during Step 4)
 │   ├── orders.py                # Order placement (filled in during Step 5)
 │   ├── risk.py                  # Risk manager (filled in during Step 6)
@@ -128,11 +130,34 @@ digests match — the same input produces the same book states.
 **Fills are never inferred.** Trades are counted only from `last_trade_price`
 events. A recorded price touching a quote proves nothing about queue position.
 
+## Queue-conservative simulator
+
+```bash
+python -m src.simulate recordings/<recording>           # one assumption point
+python -m src.simulate recordings/<recording> --grid    # sweep the assumptions
+```
+
+Replays a recording and maintains simulated resting orders alongside the
+reconstructed book. Nothing is submitted; no credentials are read.
+
+Every unresolvable question is answered against the strategy: all resting size at
+our price is ahead of us, cancels never move us up, orders are not live until the
+placement latency has passed, a cancel does not protect us until its own latency
+has passed, and fills are credited only from recorded trades whose taker side
+consumed our side. Leftover inventory is sold into the bid as a taker. Liquidity
+rewards are never credited — only eligible quoting time is reported.
+
+Queue position cannot be recovered from public data, so `--grid` sweeps latency,
+queue depth and the complementary-fill assumption. The worst corner of that range
+is the result.
+
+See `ARCHITECTURE.md` for what it found on the first recordings.
+
 ## Design notes
 
-`ARCHITECTURE.md` covers the recorder and replay design: the on-disk format, the
-quotability state machine, the invariants, the threading model, and the known
-limits.
+`ARCHITECTURE.md` covers the recorder, replay and simulator design: the on-disk
+format, the quotability state machine, the conservative fill model, the
+invariants, the threading model, the measured findings, and the known limits.
 
 ## Using a coding agent
 

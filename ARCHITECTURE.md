@@ -1,9 +1,9 @@
 # Architecture — read-only market-data recorder
 
-This document covers the recorder and replay path only: `market_spec.py`,
-`collector.py`, `market_channel.py`, `recording.py`, `orderbook.py`, `replay.py`.
-The tutorial's trading modules (`signal_engine.py`, `orders.py`, `risk.py`,
-`scheduler.py`) are out of scope and unchanged.
+This document covers the research path: `market_spec.py`, `collector.py`,
+`market_channel.py`, `recording.py`, `orderbook.py`, `replay.py`, `simulator.py`,
+`simulate.py`. The tutorial's trading modules (`signal_engine.py`, `orders.py`,
+`risk.py`, `scheduler.py`) are out of scope and unchanged.
 
 Purpose: produce recordings of public order-book data that a quoting simulator
 can be trusted to run against. Trust is the whole point — a recording that looks
@@ -30,14 +30,18 @@ Two programs with one file format between them.
          │
          ▼
   collector.py     wire them, track gaps      orderbook.py  rebuild + judge books
-         │                                            ▲
-         ▼                                            │
-  recording.py     append-only JSONL          replay.py     CLI + report
-         │                                            │
-         └──────►  recordings/<name>/  ───────────────┘
-                     metadata.json
+         │                                            ▲   walk() shared primitive
+         ▼                                            ├───────────────┐
+  recording.py     append-only JSONL          replay.py        simulator.py
+         │                                     CLI + report     fills + accounting
+         └──────►  recordings/<name>/  ───────────────┴───────────────┘
+                     metadata.json                          simulate.py CLI
                      events.jsonl
 ```
+
+`walk()` in `orderbook.py` is the shared event primitive: it yields each recorded
+event with the reconstructed books as of immediately after it. The replay report
+and the simulator both consume it, so book mechanics exist in one place.
 
 The split is load-bearing:
 
@@ -200,6 +204,34 @@ crosses the staleness boundary part-way through. This is why the report can say
 "quotable 38% of the recording" as a real duration rather than an event ratio —
 and why a recording that looks busy but was unusable cannot pass as good data.
 
+### `simulator.py` — queue-conservative fill model
+
+Simulates two-sided maker quoting over a recording. Posts nothing, reads no
+credentials. Every unresolvable question is answered against the strategy:
+
+| Question | Conservative answer |
+|---|---|
+| Where am I in the queue? | Behind everything resting at my price when I arrive |
+| Do cancels ahead of me help? | No — assumed to be behind me |
+| When is my order live? | `place_latency_ms` after the decision |
+| When does a cancel protect me? | `cancel_latency_ms` after the decision, so fills land during the race |
+| What counts as a fill? | Only a recorded `last_trade_price` whose taker side consumed my side |
+| Does a complementary mint fill me? | Off by default — it cannot be proven from public data |
+| What is leftover inventory worth? | Sold into the bid as a taker, paying the taker fee |
+| What are rewards worth? | Nothing. Eligible time is reported; no income is credited |
+
+`TwoSidedQuoter` holds inventory per outcome, merges matched pairs into USD 1.00
+at the moment the second leg fills, measures the unpaired interval between legs,
+and records a breach when unpaired size or hold time exceeds its cap.
+
+Fee accounting follows `fee = C x rate x p x (1 - p)` from the venue docs, with
+the rate taken from the market's category tag. Makers are never charged, so the
+fee appears only on close-out.
+
+`simulate_grid()` sweeps latency, queue depth, and the complementary-fill
+assumption. A single point is not a result — queue position is unknowable from
+public data, so the output is a range and the worst corner is the finding.
+
 ### `replay.py` — presentation only
 
 Load, replay, optionally replay a second time for `--verify`, render. `_render`
@@ -224,6 +256,7 @@ failure mode this architecture exists to prevent.
    A recorded price touching a quote proves nothing about queue position. The
    report states `fills_inferred: false` explicitly.
 6. **Outcome labels are preserved as the venue spells them.**
+7. **The simulator credits no fill it cannot justify, and no reward income at all.**
 
 ### Why staleness uses receipt time
 
@@ -305,10 +338,63 @@ The replay path is single-threaded and has no locks, by construction.
   the simulator that consumes these recordings, not on the recorder.
 - **One market per recording.** Recording several in parallel means several
   processes. The format would support multiplexing; the collector does not.
+- **The simulator quotes one price per outcome at a time.** No laddering, no
+  size tiering, no requoting inside a tick. A strategy that needs those is not
+  represented by these results.
+- **Liquidity rewards are never monetised.** The scoring formula needs every
+  other maker's orders, which public data does not contain. Eligible quoting time
+  is reported so the input is preserved for a later estimate.
 - **Authenticated user-channel streams are out of scope** and require separate
   explicit approval.
 
-## 7. Extension points
+## 7. What the simulator found
+
+Recorded 2026-09-13 on two markets. These are properties of the venue's book
+structure, not of the code, and they decide whether the strategy can work at all.
+
+**The whole edge is one tick.** Best bid on one outcome plus best bid on the
+other summed to **0.99** — median, minimum and maximum — on both markets. The ask
+sum was 1.01. With a 0.01 tick, a two-sided maker's maximum gross capture is
+exactly one tick per pair, or 1% of the USD 1.00 the pair merges into.
+
+**Joining the queue does not fill.** Median depth at the best bid was 133 shares.
+Total trade volume across the whole BTC 15M recording — both outcomes, all prices,
+70 seconds — was 164 shares, median trade 7 shares. Only 5 shares of consuming
+flow reached our price. Flow never came close to clearing the queue ahead.
+
+**Stepping in front removes the edge.** Quoting one tick better on both sides
+raises the pair cost to a median of **1.00**. The improvement costs exactly what
+the pair is worth.
+
+That is a pincer, and it is the result: join and you hold a 1% edge you never
+capture; improve and you capture a fill worth nothing. Neither arm depends on the
+latency or queue assumptions — the grid is flat across all twelve points.
+
+**Rewards pay for resting, not for filling.** Quoting both sides at the market's
+200-share reward minimum was reward-eligible for 100% of an 18-minute recording
+while filling zero times. That is the one path here with a positive expectancy,
+and it does not depend on capturing spread at all.
+
+Its size is bounded by public data. Qualifying depth within the market's
+`max_spread` of midpoint was a median of **2,313,950 shares**. A 200-share quote
+on each side is 0.017% of that, which against the market's USD 1000/day pool is
+about **USD 0.17/day — below the venue's USD 1 minimum payout, so it pays
+nothing.** Clearing the minimum needs roughly 1,150 shares a side, near USD 1,150
+of capital, to earn that USD 1.
+
+Treat the implied rate as an upper bound and not a forecast. It ignores the
+quadratic scoring function that weights orders by closeness to midpoint, assumes
+the pool and the competing depth hold still, and credits no cost for the
+adverse-selection and inventory risk that arrive with the fills it ignores. The
+simulator therefore reports the inputs and refuses to credit the income.
+
+None of this closes the strategy. It says these two markets cannot support the
+spread-capture version, and it names the statistics that would decide any
+candidate: flow-to-depth at the touch, and our size against the qualifying depth.
+`--list-rewarded` plus a short recording measures both before any capital is
+considered.
+
+## 8. Extension points
 
 The next milestone — paper orders and a queue-conservative fill simulator —
 consumes recordings rather than modifying the recorder.

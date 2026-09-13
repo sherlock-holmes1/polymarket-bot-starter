@@ -665,3 +665,106 @@ def _levels(rows: list[dict[str, str]]) -> dict[str, float]:
 
 def _fmt(value: float | None) -> str:
     return "-" if value is None else f"{value:.6f}"
+
+
+@dataclass(frozen=True)
+class Trade:
+    """A trade the venue reported. `side` is the taker's side."""
+
+    asset_id: str
+    price: float
+    size: float
+    side: str
+
+
+@dataclass
+class Tick:
+    """One recorded event, with book state as of immediately after it."""
+
+    sequence: int
+    at_ms: int | None
+    kind: str
+    event_type: str
+    payload: dict[str, Any]
+    books: dict[str, OrderBook]
+    trades: list[Trade]
+    gap_open: bool
+
+    def quotable(self, asset_id: str, max_stale_ms: int = DEFAULT_MAX_STALE_MS) -> bool:
+        book = self.books.get(asset_id)
+        if book is None:
+            return False
+        return book.reject_reason(self.at_ms, max_stale_ms) == REASON_QUOTABLE
+
+
+def walk(
+    rows: Iterable[dict[str, Any]],
+    *,
+    divergence_tolerance: int = DEFAULT_DIVERGENCE_TOLERANCE,
+) -> Iterable[Tick]:
+    """Yield each recorded event with the reconstructed books after applying it.
+
+    The shared primitive behind both the replay report and the simulator, so book
+    mechanics are written once. Broadcast events are skipped.
+    """
+    books: dict[str, OrderBook] = {}
+    gap_open = False
+
+    for index, row in enumerate(rows, start=1):
+        kind = str(row.get("kind", ""))
+        payload = row.get("payload") or {}
+        sequence = int(row.get("sequence") or index)
+        at_ms = _row_time_ms(row)
+
+        if kind == "collector_gap":
+            state = str(payload.get("state", ""))
+            if state == "opened":
+                gap_open = True
+                for book in books.values():
+                    book.invalidate(REASON_GAP_OPEN)
+            elif state == "closed":
+                gap_open = False
+            continue
+        if kind != "market_event":
+            continue
+
+        event_type = str(payload.get("event_type") or "")
+        if event_type in BROADCAST_EVENT_TYPES or event_type not in BOOK_EVENT_TYPES:
+            continue
+
+        trades: list[Trade] = []
+        venue_top: dict[str, tuple[Any, Any]] = {}
+
+        if event_type == "book":
+            asset_id = str(payload["asset_id"])
+            books.setdefault(asset_id, OrderBook()).apply_snapshot(
+                payload, sequence=sequence, at_ms=at_ms
+            )
+        elif event_type == "price_change":
+            for change in payload.get("price_changes") or []:
+                asset_id = str(change["asset_id"])
+                book = books.setdefault(asset_id, OrderBook())
+                if not book.has_snapshot:
+                    book.invalidate(REASON_NO_SNAPSHOT)
+                    continue
+                book.apply_price_change(change, at_ms=at_ms)
+                venue_top[asset_id] = (change.get("best_bid"), change.get("best_ask"))
+        elif event_type == "last_trade_price":
+            asset_id = str(payload.get("asset_id") or "")
+            books.setdefault(asset_id, OrderBook())
+            trades.append(Trade(
+                asset_id=asset_id,
+                price=float(payload.get("price") or 0.0),
+                size=float(payload.get("size") or 0.0),
+                side=str(payload.get("side") or ""),
+            ))
+
+        for asset_id, (venue_bid, venue_ask) in venue_top.items():
+            books[asset_id].check_against_venue_top(
+                venue_bid, venue_ask, tolerance=divergence_tolerance
+            )
+
+        yield Tick(
+            sequence=sequence, at_ms=at_ms, kind=kind, event_type=event_type,
+            payload=payload, books=books, trades=trades, gap_open=gap_open,
+        )
