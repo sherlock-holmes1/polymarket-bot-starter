@@ -17,6 +17,11 @@ polymarket-bot-starter/
 │   ├── markets.py               # Active market lookup — refreshes the slug each cycle
 │   ├── price_feed.py            # Polymarket RTDS Chainlink (primary) + Coinbase WS (fallback)
 │   ├── market_channel.py        # CLOB market WS — auto-resubscribes when the cycle rolls
+│   ├── market_spec.py           # Explicit market selection + full public spec
+│   ├── collector.py             # Read-only recorder (milestone 1)
+│   ├── recording.py             # Append-only JSONL recordings, three clocks
+│   ├── orderbook.py             # Deterministic replay + quotability rules
+│   ├── replay.py                # Replay CLI
 │   ├── signal_engine.py         # Signal generation (filled in during Step 4)
 │   ├── orders.py                # Order placement (filled in during Step 5)
 │   ├── risk.py                  # Risk manager (filled in during Step 6)
@@ -47,6 +52,87 @@ python main.py
 ```
 
 `main.py` does nothing useful out of the box — it prints a banner and exits. The tutorial walks you through filling in each module.
+
+## Read-only market-data recorder
+
+The first research milestone: a public market-data recorder and a deterministic
+replay. No credentials, no signing, no order submission — read-only collection
+stays permitted where trading is not.
+
+```bash
+# 1. Pick a market on purpose (reward-enabled markets, highest daily rate first)
+python -m src.collector --list-rewarded
+
+# 2. Record it
+python -m src.collector --slug btc-updown-15m-1789326900 --duration 900
+python -m src.collector --condition-id 0xa3b3… --output recordings
+python -m src.collector --btc-updown-15m        # follow the rolling 15M window
+
+# 3. Replay it
+python -m src.replay recordings/<recording> --verify
+python -m src.replay recordings/<recording> --json
+```
+
+### What a recording contains
+
+`metadata.json` holds the market's full public trading configuration as observed,
+with the timestamp of the observation: outcome token IDs with their **verbatim**
+labels (`Up`/`Down`, `Yes`/`No`), tick size, minimum order size, maker and taker
+base fees, and the liquidity-reward configuration (`min_size`, `max_spread`,
+daily rate).
+
+`events.jsonl` holds every event in arrival order, payloads untouched, each row
+stamped with three clocks:
+
+| Field | Clock |
+|---|---|
+| `exchange_timestamp_ms` | the venue's own timestamp, when it supplies one |
+| `received_unix_ms` / `received_at` | local wall clock at receipt |
+| `received_monotonic_ns` | local monotonic clock, immune to NTP steps |
+
+Alongside the market events the file records `market_spec` re-observations,
+`connection` state changes, and `collector_gap` markers.
+
+### Gaps
+
+The market channel reconnects whenever the stream closes — not only when the
+market rolls — and a close wakes the supervisor immediately rather than waiting
+out the poll interval. A drop opens a `collector_gap`, which closes only once a
+fresh book snapshot has arrived for **every** subscribed token.
+
+### What replay asserts
+
+Replay rebuilds one local book per outcome and decides, at every instant, whether
+that book is fit to quote against. A book is not quotable while it is
+un-snapshotted, inside a gap, one-sided, crossed, older than `--max-stale-ms`, or
+**diverged from the venue's own top of book**. Time in each state is accounted
+for, so a recording that looks busy but was unquotable for most of its length
+cannot pass as good data.
+
+Divergence is the check that catches a silently dropped delta — the failure a
+determinism check cannot see, because a lossy recorder replays reproducibly.
+Every `price_change` carries the venue's own best bid and ask for that update, so
+the rebuilt book is compared against it in-band on every delta. One disagreement
+is a sampling race (0.02% on live data); `--divergence-tolerance` consecutive
+disagreements mean the book has actually drifted, and it stops being quotable
+until the next snapshot rebuilds it.
+
+`best_bid_ask` events are sampled at their own instant and disagreed on 31% of
+reads in the same recording, so they are reported as an observation and never
+reject a book. See `ARCHITECTURE.md` for the measurements.
+
+The report gives duration, event counts, gaps, feed latency, spread and depth
+statistics, and a state digest. `--verify` replays the file twice and confirms the
+digests match — the same input produces the same book states.
+
+**Fills are never inferred.** Trades are counted only from `last_trade_price`
+events. A recorded price touching a quote proves nothing about queue position.
+
+## Design notes
+
+`ARCHITECTURE.md` covers the recorder and replay design: the on-disk format, the
+quotability state machine, the invariants, the threading model, and the known
+limits.
 
 ## Using a coding agent
 

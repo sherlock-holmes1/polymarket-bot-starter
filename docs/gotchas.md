@@ -12,7 +12,7 @@ The starter project's source code already implements the fixes for the gotchas m
 
 A new BTC Up/Down 15M market opens every 15 minutes with a fresh `condition_id` and fresh UP / DOWN token IDs. The old market resolves and stops accepting orders. If your bot hardcodes `condition_id`, it places exactly one cycle of orders successfully and then silently does nothing forever after.
 
-**How the starter handles it:** `src/markets.get_active_btc_15m_market(client)` re-scans every cycle by `market_slug` prefix, filters to `active=true` markets whose `end_date_iso` is in the future, and picks the one with the soonest expiry.
+**How the starter handles it:** `src/markets.get_active_btc_15m_market(client)` re-resolves the window on every cycle — it derives the current window's slug from the clock, resolves it to a `condition_id`, and confirms the market is still accepting orders before returning it.
 
 ### `[fixed]` The CLOB market WebSocket must resubscribe at every cycle roll
 
@@ -25,6 +25,38 @@ Because the active token IDs change every 15 minutes, a long-lived subscription 
 For 5–15 seconds between an old market resolving and a new one becoming visible in `get_markets()`, your active-market lookup will return nothing. Retry, don't abort.
 
 **How the starter handles it:** `get_active_btc_15m_market` raises a `RuntimeError` with a hint to retry. The scheduler loop catches it and waits one cycle.
+
+### `[fixed]` The BTC Up/Down 15M slug is `btc-updown-15m-<window-start-epoch>`
+
+Not `btc-up-or-down-15m-<date>-<time>`. Each window is named by its own start
+epoch, so the active slug is derivable from the clock — no lookup needed to know
+what to ask for. Scanning `get_markets()` pages for this series finds nothing;
+it does not sit near the front of that listing.
+
+**How the starter handles it:** `src/market_spec.current_btc_updown_15m_slug()`
+derives the slug, resolves it to a `condition_id` via the public Gamma API, then
+reads the full CLOB market object.
+
+### `end_date_iso` on the 15M series is the calendar day, not the window
+
+A market whose window closes at 3:30PM ET reports `end_date_iso` of
+`2026-09-13T00:00:00Z`. Computing a cycle deadline from it is wrong by up to 24
+hours. The window end is the slug's epoch plus 900 seconds —
+`src/markets.window_end_iso()` does this.
+
+### `new_market` and `market_resolved` are venue-wide broadcasts
+
+With `custom_feature_enabled: true` you receive these for *every* market on
+Polymarket, not just the asset IDs you subscribed to. In a 70-second recording of
+one market, 131 of them arrived for unrelated 5-minute crypto and sports markets.
+Filter by your own condition ID before counting them as your market's events.
+
+### A `book` snapshot's `timestamp` is the last book change, not the emit time
+
+Subtracting it from local receipt time reads as tens of seconds of "latency" on a
+quiet market. Measure feed latency on `price_change` and `last_trade_price` only.
+Measure book *freshness* on your own receipt clock — that is what your knowledge
+of the book is actually worth.
 
 ### Question text changes more often than the slug pattern
 

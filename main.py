@@ -1,7 +1,7 @@
 """Polymarket BTC Up/Down 15M trading bot — entry point.
 
-This file wires the modules together. Each module is filled in across the
-eight-step tutorial. Running it as-is prints a banner and exits.
+This file wires the modules together. The read-only market-data recorder runs
+separately with `python -m src.collector`.
 """
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ logger = get_logger(__name__)
 
 def main() -> None:
     logger.info("=" * 60)
-    logger.info("Polymarket BTC Up/Down 15M Bot — starter skeleton")
-    logger.info("Follow the tutorial steps to fill in each module.")
+    logger.info("Polymarket BTC Up/Down 15M Bot")
+    logger.info("Read-only recorder: python -m src.collector --list-rewarded")
+    logger.info("Deterministic replay: python -m src.replay <recording> --verify")
     logger.info("Reference docs are in ./docs/")
     logger.info("=" * 60)
 
