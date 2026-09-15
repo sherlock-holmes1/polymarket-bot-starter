@@ -57,6 +57,26 @@ class RewardConfig:
 
 
 @dataclass(frozen=True)
+class FeeSchedule:
+    """The market's own published fee parameters — authoritative over category.
+
+    `fee = shares x rate x (p x (1 - p)) ** exponent`, takers only when
+    `taker_only`. A market with no schedule and a zero rate is fee-free.
+    """
+
+    rate: float | None
+    exponent: float | None
+    taker_only: bool | None
+    enabled: bool
+
+    @property
+    def taker_rate(self) -> float | None:
+        if not self.enabled:
+            return 0.0
+        return self.rate
+
+
+@dataclass(frozen=True)
 class MarketSpec:
     """Everything the public API says about how one market trades, at one instant."""
 
@@ -82,6 +102,7 @@ class MarketSpec:
     is_50_50_outcome: bool
     tags: list[str]
     rewards: RewardConfig
+    fees: FeeSchedule
     outcomes: list[Outcome]
     raw: dict[str, Any]
 
@@ -98,7 +119,8 @@ class MarketSpec:
         return (
             f"{self.market_slug} [{labels}] tick={self.minimum_tick_size} "
             f"min_size={self.minimum_order_size} rewards_daily={self.rewards.daily_rate_total} "
-            f"reward_min_size={self.rewards.min_size} reward_max_spread={self.rewards.max_spread}"
+            f"reward_min_size={self.rewards.min_size} reward_max_spread={self.rewards.max_spread} "
+            f"taker_fee_rate={self.fees.taker_rate}"
         )
 
 
@@ -116,15 +138,31 @@ def select_market(
 
 
 def fetch_market_spec(client: ClobClient, condition_id: str) -> MarketSpec:
-    """Read the CLOB market object for `condition_id` and stamp the observation."""
+    """Read the CLOB market object for `condition_id` and stamp the observation.
+
+    Also reads `/markets/{id}` info, which carries the market's own fee schedule.
+    The category fee table is a fallback, not a source of truth: the Russia ER
+    market is fee-free while its Politics tag implies 0.04.
+    """
     market = retry_with_backoff(lambda: client.get_market(condition_id), logger=logger)
     if not isinstance(market, dict) or not market.get("condition_id"):
         raise RuntimeError(f"CLOB returned no market for condition_id={condition_id!r}: {market!r}")
-    return build_market_spec(market)
+    info: dict[str, Any] | None = None
+    try:
+        info = client.get_clob_market_info(condition_id)
+    except Exception as exc:
+        logger.warning(f"Fee schedule unavailable for {condition_id}: {exc!r}")
+    return build_market_spec(market, market_info=info)
 
 
-def build_market_spec(market: dict[str, Any]) -> MarketSpec:
-    """Convert a raw CLOB market payload into a timestamped `MarketSpec`."""
+def build_market_spec(
+    market: dict[str, Any], *, market_info: dict[str, Any] | None = None
+) -> MarketSpec:
+    """Convert a raw CLOB market payload into a timestamped `MarketSpec`.
+
+    `market_info` is the `get_clob_market_info` response, whose `fd` key carries
+    the market's published fee schedule.
+    """
     now = datetime.now(timezone.utc)
     rewards_raw = market.get("rewards") or {}
     rewards = RewardConfig(
@@ -141,6 +179,7 @@ def build_market_spec(market: dict[str, Any]) -> MarketSpec:
         )
         for token in market.get("tokens") or []
     ]
+    fees = _build_fee_schedule(market, market_info)
     missing = [outcome for outcome in outcomes if not outcome.token_id or not outcome.label]
     if len(outcomes) < 2 or missing:
         raise RuntimeError(
@@ -169,9 +208,31 @@ def build_market_spec(market: dict[str, Any]) -> MarketSpec:
         is_50_50_outcome=bool(market.get("is_50_50_outcome")),
         tags=[str(tag) for tag in market.get("tags") or []],
         rewards=rewards,
+        fees=fees,
         outcomes=outcomes,
         raw=market,
     )
+
+
+def _build_fee_schedule(
+    market: dict[str, Any], market_info: dict[str, Any] | None
+) -> FeeSchedule:
+    """Prefer the market's published schedule; fall back to the base-fee flag."""
+    schedule = (market_info or {}).get("fd")
+    if isinstance(schedule, dict):
+        return FeeSchedule(
+            rate=_optional_float(schedule.get("r")),
+            exponent=_optional_float(schedule.get("e")),
+            taker_only=schedule.get("to"),
+            enabled=True,
+        )
+    if market_info is not None:
+        # Info was fetched and carried no schedule: the market is fee-free.
+        return FeeSchedule(rate=0.0, exponent=1.0, taker_only=True, enabled=False)
+    base = market.get("taker_base_fee")
+    if base is not None and float(base) == 0:
+        return FeeSchedule(rate=0.0, exponent=1.0, taker_only=True, enabled=False)
+    return FeeSchedule(rate=None, exponent=None, taker_only=None, enabled=True)
 
 
 def resolve_condition_id(slug: str) -> str:

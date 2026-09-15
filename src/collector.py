@@ -16,6 +16,7 @@ permitted where trading is not.
 from __future__ import annotations
 
 import argparse
+import json
 import signal
 import threading
 import time
@@ -34,7 +35,7 @@ from src.market_spec import (
     select_active_btc_updown_15m,
     select_market,
 )
-from src.recording import JsonlRecorder, utc_now_iso
+from src.recording import JsonlRecorder, _json_ready, utc_now_iso
 from src.utils import get_logger
 
 CLOB_BASE_URL = "https://clob.polymarket.com"
@@ -239,6 +240,8 @@ def main() -> int:
                           help="Follow the rolling BTC Up/Down 15M window")
     selector.add_argument("--list-rewarded", action="store_true",
                           help="List reward-enabled markets and exit without recording")
+    parser.add_argument("--describe", action="store_true",
+                        help="Print the selected market's full public configuration and exit")
     parser.add_argument("--output", type=Path, default=Path("recordings"))
     parser.add_argument("--poll-interval", type=int, default=10,
                         help="Seconds between market/connection checks (default: %(default)s)")
@@ -258,6 +261,9 @@ def main() -> int:
         parser.error("select a market: --condition-id, --slug, --btc-updown-15m, or --list-rewarded")
 
     resolver, mode, rolled = _build_resolver(client, args)
+    if args.describe:
+        print(json.dumps(_json_ready(asdict(resolver())), indent=2, sort_keys=True))
+        return 0
     if args.btc_updown_15m:
         logger.info(f"Rolling mode — current window slug is {current_btc_updown_15m_slug()}")
 

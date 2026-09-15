@@ -240,7 +240,16 @@ def _summarize_reward_share(depths: list[float], our_size: float) -> dict[str, A
 
 
 def taker_fee_rate(spec: MarketSpec) -> float:
-    """Category taker rate for close-out costing. Makers are never charged."""
+    """Taker rate for close-out costing. Makers are never charged.
+
+    The market's own published schedule wins. The category table is a fallback
+    for recordings made before the schedule was captured, and it is only a guide:
+    the Russia ER market is fee-free while its Politics tag implies 0.04, and the
+    Fed market publishes 0.05 where its tags imply 0.04.
+    """
+    published = spec.fees.taker_rate
+    if published is not None:
+        return published
     for tag in spec.tags:
         rate = TAKER_FEE_RATES.get(tag.strip().lower())
         if rate is not None:
@@ -248,9 +257,9 @@ def taker_fee_rate(spec: MarketSpec) -> float:
     return TAKER_FEE_RATES["default"]
 
 
-def taker_fee(shares: float, price: float, rate: float) -> float:
-    """fee = C x rate x p x (1 - p) — docs/polymarket/trading/fees.md."""
-    return shares * rate * price * (1.0 - price)
+def taker_fee(shares: float, price: float, rate: float, exponent: float = 1.0) -> float:
+    """fee = C x rate x (p x (1 - p)) ** exponent — docs/polymarket/trading/fees.md."""
+    return shares * rate * (price * (1.0 - price)) ** exponent
 
 
 class TwoSidedQuoter:
@@ -513,7 +522,9 @@ class TwoSidedQuoter:
             price = bid if bid is not None else 0.0
             self.result.closeout_shares[asset_id] = shares
             self.result.closeout_proceeds += shares * price
-            self.result.closeout_fees += taker_fee(shares, price, self.fee_rate)
+            self.result.closeout_fees += taker_fee(
+                shares, price, self.fee_rate, self.spec.fees.exponent or 1.0
+            )
 
 
 def simulate(
