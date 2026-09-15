@@ -1,5 +1,14 @@
 # Architecture — read-only market-data recorder
 
+## Workflow
+
+1. Select one market and collect its raw public WebSocket events for a defined period.
+2. Replay the recording to rebuild the bid and ask books from snapshots and price changes.
+3. Reject untrustworthy book states: missing snapshots, collection gaps, empty sides, crossed prices, stale updates, and sustained disagreement with the venue's in-band top of book.
+4. Use only the validated reconstructed books in the queue-conservative simulator.
+
+The purpose is to test whether supplying two-sided liquidity can earn more from spread capture than it loses through queue position, unpaired inventory, adverse selection, and close-out fees. It is not a price-prediction system. The collector establishes whether the market data is trustworthy; replay establishes when the market was safe to quote; the simulator tests whether a maker strategy could have been viable under conservative assumptions. No step submits an order or infers fills from a price touching a quote.
+
 This document covers the research path: `market_spec.py`, `collector.py`,
 `market_channel.py`, `recording.py`, `orderbook.py`, `replay.py`, `simulator.py`,
 `simulate.py`. The tutorial's trading modules (`signal_engine.py`, `orders.py`,
