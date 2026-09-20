@@ -12,6 +12,7 @@ permitted where trading is not.
     python -m src.collector --slug btc-updown-15m-1789326900 --duration 900
     python -m src.collector --condition-id 0x0fa2… --output recordings
     python -m src.collector --btc-updown-15m          # follows the rolling window
+    python -m src.collector --btc-updown-5m           # follows the rolling window
 """
 from __future__ import annotations
 
@@ -30,8 +31,10 @@ from py_clob_client_v2 import ClobClient
 from src.market_channel import MarketChannelSupervisor
 from src.market_spec import (
     MarketSpec,
+    current_btc_updown_5m_slug,
     current_btc_updown_15m_slug,
     list_reward_eligible_markets,
+    select_active_btc_updown_5m,
     select_active_btc_updown_15m,
     select_market,
 )
@@ -213,6 +216,12 @@ def _build_resolver(
             "btc-updown-15m",
             lambda spec: current_btc_updown_15m_slug() != spec.market_slug,
         )
+    if args.btc_updown_5m:
+        return (
+            lambda: select_active_btc_updown_5m(client),
+            "btc-updown-5m",
+            lambda spec: current_btc_updown_5m_slug() != spec.market_slug,
+        )
     never_rolls: Callable[[MarketSpec], bool] = lambda _spec: False
     if args.condition_id:
         return (lambda: select_market(client, condition_id=args.condition_id)), "fixed", never_rolls
@@ -238,6 +247,8 @@ def main() -> int:
     selector.add_argument("--slug", help="Record this market by slug")
     selector.add_argument("--btc-updown-15m", action="store_true",
                           help="Follow the rolling BTC Up/Down 15M window")
+    selector.add_argument("--btc-updown-5m", action="store_true",
+                          help="Follow the rolling BTC Up/Down 5M window")
     selector.add_argument("--list-rewarded", action="store_true",
                           help="List reward-enabled markets and exit without recording")
     parser.add_argument("--describe", action="store_true",
@@ -257,8 +268,11 @@ def main() -> int:
     if args.list_rewarded:
         _print_rewarded(client, args.limit)
         return 0
-    if not (args.condition_id or args.slug or args.btc_updown_15m):
-        parser.error("select a market: --condition-id, --slug, --btc-updown-15m, or --list-rewarded")
+    if not (args.condition_id or args.slug or args.btc_updown_15m or args.btc_updown_5m):
+        parser.error(
+            "select a market: --condition-id, --slug, --btc-updown-15m, "
+            "--btc-updown-5m, or --list-rewarded"
+        )
 
     resolver, mode, rolled = _build_resolver(client, args)
     if args.describe:
@@ -266,6 +280,8 @@ def main() -> int:
         return 0
     if args.btc_updown_15m:
         logger.info(f"Rolling mode — current window slug is {current_btc_updown_15m_slug()}")
+    if args.btc_updown_5m:
+        logger.info(f"Rolling mode — current window slug is {current_btc_updown_5m_slug()}")
 
     collector = PublicMarketCollector(
         args.output,

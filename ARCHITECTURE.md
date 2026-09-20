@@ -128,6 +128,7 @@ Three selection paths converge on it:
 | `select_market(condition_id=…)` | CLOB `get_market()` directly |
 | `select_market(slug=…)` | Gamma resolves slug → condition ID, then CLOB |
 | `select_active_btc_updown_15m()` | derives the current window slug, then as above |
+| `select_active_btc_updown_5m()` | derives the current 5M window slug, then as above |
 | `list_reward_eligible_markets()` | CLOB `/sampling-markets` — the reward-enabled set |
 
 `Outcome.label` stores the venue's spelling verbatim: `Up`/`Down` on a crypto
@@ -140,6 +141,10 @@ needs no search. Two facts about this series were wrong in the starter and are
 documented in `docs/gotchas.md`: the slug prefix is `btc-updown-15m`, not
 `btc-up-or-down-15m`; and `end_date_iso` is the calendar day, not the window end
 (`markets.window_end_iso()` derives the real one).
+
+`current_btc_updown_5m_slug()` applies the same calculation with a 300-second
+window and the `btc-updown-5m` prefix. The read-only collector exposes both
+rolling selectors; its resubscription logic refreshes the token IDs at each roll.
 
 ### `recording.py` — append-only writer
 

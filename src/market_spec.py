@@ -27,6 +27,8 @@ logger = get_logger(__name__)
 GAMMA_BASE_URL = "https://gamma-api.polymarket.com"
 BTC_UPDOWN_15M_SLUG_PREFIX = "btc-updown-15m"
 BTC_UPDOWN_15M_WINDOW_S = 900
+BTC_UPDOWN_5M_SLUG_PREFIX = "btc-updown-5m"
+BTC_UPDOWN_5M_WINDOW_S = 300
 
 
 @dataclass(frozen=True)
@@ -264,6 +266,17 @@ def current_btc_updown_15m_slug(now_unix: float | None = None) -> str:
     return f"{BTC_UPDOWN_15M_SLUG_PREFIX}-{window_start}"
 
 
+def current_btc_updown_5m_slug(now_unix: float | None = None) -> str:
+    """Slug of the BTC Up/Down 5M window currently open.
+
+    Like the 15M series, this series names each window by its start epoch. The
+    current slug is therefore a clock calculation, not a paginated market search.
+    """
+    now = int(now_unix if now_unix is not None else time.time())
+    window_start = now - (now % BTC_UPDOWN_5M_WINDOW_S)
+    return f"{BTC_UPDOWN_5M_SLUG_PREFIX}-{window_start}"
+
+
 def select_active_btc_updown_15m(client: ClobClient) -> MarketSpec:
     """Resolve the BTC Up/Down 15M market for the window currently open.
 
@@ -284,6 +297,30 @@ def select_active_btc_updown_15m(client: ClobClient) -> MarketSpec:
         errors.append(f"{slug}: accepting_orders={spec.accepting_orders} closed={spec.closed}")
     raise RuntimeError(
         "No BTC Up/Down 15M market is accepting orders right now. "
+        f"Tried: {'; '.join(errors)}"
+    )
+
+
+def select_active_btc_updown_5m(client: ClobClient) -> MarketSpec:
+    """Resolve the BTC Up/Down 5M market for the window currently open.
+
+    Around a window boundary the next market can lag by a few seconds, so the
+    previous window is used as a fallback while it is still accepting orders.
+    """
+    now = time.time()
+    errors: list[str] = []
+    for offset in (0, -BTC_UPDOWN_5M_WINDOW_S):
+        slug = current_btc_updown_5m_slug(now + offset)
+        try:
+            spec = select_market(client, slug=slug)
+        except Exception as exc:
+            errors.append(f"{slug}: {exc!r}")
+            continue
+        if spec.accepting_orders and not spec.closed:
+            return spec
+        errors.append(f"{slug}: accepting_orders={spec.accepting_orders} closed={spec.closed}")
+    raise RuntimeError(
+        "No BTC Up/Down 5M market is accepting orders right now. "
         f"Tried: {'; '.join(errors)}"
     )
 

@@ -69,6 +69,7 @@ python -m src.collector --list-rewarded
 python -m src.collector --slug btc-updown-15m-1789326900 --duration 900
 python -m src.collector --condition-id 0xa3b3… --output recordings
 python -m src.collector --btc-updown-15m        # follow the rolling 15M window
+python -m src.collector --btc-updown-5m         # follow the rolling 5M window
 
 # 3. Replay it
 python -m src.replay recordings/<recording> --verify

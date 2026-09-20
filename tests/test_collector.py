@@ -8,8 +8,10 @@ once a fresh snapshot has arrived for every subscribed token.
 from __future__ import annotations
 
 import json
+from argparse import Namespace
 from pathlib import Path
 
+import src.collector as collector_module
 from src.collector import PublicMarketCollector
 from src.market_spec import build_market_spec
 
@@ -120,3 +122,18 @@ def test_a_gap_still_open_at_shutdown_is_closed_out_in_the_recording(tmp_path: P
     assert ("collector_gap", "opened") in kinds
     assert ("collector_gap", "closed") in kinds
     assert kinds[-1][0] == "collector_stopped"
+
+
+def test_rolling_5m_selection_refreshes_when_the_slug_rolls(monkeypatch) -> None:
+    spec = build_market_spec({**MARKET, "market_slug": "btc-updown-5m-1789843500"})
+    monkeypatch.setattr(collector_module, "select_active_btc_updown_5m", lambda _client: spec)
+    monkeypatch.setattr(collector_module, "current_btc_updown_5m_slug", lambda: spec.market_slug)
+    args = Namespace(condition_id=None, slug=None, btc_updown_15m=False, btc_updown_5m=True)
+
+    resolve, mode, rolled = collector_module._build_resolver(object(), args)
+
+    assert resolve() is spec
+    assert mode == "btc-updown-5m"
+    assert rolled(spec) is False
+    monkeypatch.setattr(collector_module, "current_btc_updown_5m_slug", lambda: "btc-updown-5m-1789843800")
+    assert rolled(spec) is True
